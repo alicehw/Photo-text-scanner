@@ -5,6 +5,7 @@ import easyocr
 import numpy as np
 from PIL import Image
 import io
+import gc
 
 app = FastAPI(title="EasyOCR API")
 
@@ -15,14 +16,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache reader theo ngôn ngữ
-readers = {}
+# Chỉ giữ 1 reader tại một thời điểm để tiết kiệm RAM
+current_reader = None
+current_lang = None
 
 def get_reader(lang: str):
-    if lang not in readers:
+    global current_reader, current_lang
+    if current_lang != lang:
+        # Giải phóng reader cũ trước
+        current_reader = None
+        gc.collect()
         lang_list = lang.split("+")
-        readers[lang] = easyocr.Reader(lang_list, gpu=False)
-    return readers[lang]
+        current_reader = easyocr.Reader(lang_list, gpu=False, verbose=False)
+        current_lang = lang
+    return current_reader
 
 @app.get("/")
 def root():
@@ -35,7 +42,12 @@ async def ocr(
 ):
     try:
         contents = await file.read()
+        # Resize ảnh nếu quá lớn để tiết kiệm RAM
         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        max_size = 1920
+        if max(image.size) > max_size:
+            image.thumbnail((max_size, max_size), Image.LANCZOS)
+
         img_array = np.array(image)
 
         reader = get_reader(lang)
@@ -47,7 +59,7 @@ async def ocr(
             lines.append({"text": text, "confidence": round(conf * 100, 1)})
             total_conf += conf
 
-        full_text = " ".join([r["text"] for r in lines])
+        full_text = "\n".join([r["text"] for r in lines])
         avg_conf = round((total_conf / len(results)) * 100, 1) if results else 0
 
         return {
